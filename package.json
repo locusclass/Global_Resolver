@@ -10,8 +10,6 @@
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
-    "lint": "eslint \"src/**/*.ts\"",
-    "test": "tsx --test src/**/*.test.ts",
     "db:migrate": "tsx src/db/migrate.ts up",
     "db:migrate:down": "tsx src/db/migrate.ts down",
     "seed": "tsx src/scripts/seed.ts"
@@ -19,7 +17,6 @@
   "dependencies": {
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^5.2.5",
-    "@locus-class/shared": "file:src/shared",
     "bcryptjs": "^3.0.2",
     "fastify": "^5.7.4",
     "jose": "^6.1.2",
