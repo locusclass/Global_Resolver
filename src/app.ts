@@ -8,7 +8,7 @@ import {
   type CanonicalJsonValue,
   type LocusObjectDraft,
   type PresenceProof
-} from "@locus-class/shared";
+} from "./shared/index.js";
 import Fastify, { type FastifyInstance } from "fastify";
 import { z } from "zod";
 
@@ -111,7 +111,12 @@ async function storeObject(params: {
   parentObjectId: string | null;
   supersedesObjectId: string | null;
 }): Promise<StoredResolverObject> {
-  const cellId = cellIdFromLatLng(params.presence.lat, params.presence.lng, Number(process.env.H3_RESOLUTION ?? 10));
+  const cellId = cellIdFromLatLng(
+    params.presence.lat,
+    params.presence.lng,
+    Number(process.env.H3_RESOLUTION ?? 10)
+  );
+
   const payloadHash = await createObjectDraftHash({
     schema_id: params.draft.schema_id,
     radius_m: params.draft.radius_m,
@@ -138,22 +143,11 @@ async function storeObject(params: {
         project_id
       )
       VALUES (
-        $1,
-        $2,
-        $3,
-        $4::jsonb,
-        $5,
-        $6,
-        $7,
-        $8::jsonb,
-        $9,
-        $10,
-        $11,
-        $12,
-        $13,
-        $14
+        $1,$2,$3,$4::jsonb,$5,$6,$7,$8::jsonb,
+        $9,$10,$11,$12,$13,$14
       )
-      RETURNING object_id, schema_id, radius_m, payload, cell_id, created_at, parent_object_id, supersedes_object_id
+      RETURNING object_id, schema_id, radius_m, payload, cell_id,
+                created_at, parent_object_id, supersedes_object_id
     `,
     [
       randomUUID(),
@@ -180,7 +174,9 @@ async function isKeyActive(projectId: string, keyId: string): Promise<boolean> {
   const rows = await query<{ ok: number }>(
     `SELECT 1 as ok
      FROM api_keys
-     WHERE project_id = $1 AND key_id = $2 AND revoked_at IS NULL
+     WHERE project_id = $1
+       AND key_id = $2
+       AND revoked_at IS NULL
      LIMIT 1`,
     [projectId, keyId]
   );
@@ -192,6 +188,8 @@ export function buildApp(): FastifyInstance {
 
   app.get("/health", async () => ({ message: "ok" }));
   app.get("/v1/health", async () => ({ message: "ok" }));
+
+  // ---------- DEV + PROJECT ----------
 
   app.post("/v1/dev/register", async (request, reply) => {
     const body = registerDeveloperBody.parse(request.body ?? {});
@@ -205,10 +203,12 @@ export function buildApp(): FastifyInstance {
   app.post("/v1/projects", async (request, reply) => {
     const body = createProjectBody.parse(request.body ?? {});
     const rows = await query<{ id: string; name: string; tier: "free" | "pro"; created_at: Date }>(
-      `INSERT INTO projects(developer_id, name) VALUES ($1, $2)
+      `INSERT INTO projects(developer_id, name)
+       VALUES ($1, $2)
        RETURNING id, name, tier, created_at`,
       [body.developer_id, body.name]
     );
+
     const project = rows[0];
     return reply.code(201).send({
       project_id: project.id,
@@ -228,15 +228,18 @@ export function buildApp(): FastifyInstance {
       "SELECT id, name, tier, created_at FROM projects WHERE developer_id = $1 ORDER BY created_at DESC",
       [developerId]
     );
+
     return reply.send({
-      projects: rows.map((project) => ({
-        project_id: project.id,
-        name: project.name,
-        tier: project.tier,
-        created_at: project.created_at.toISOString()
+      projects: rows.map((p) => ({
+        project_id: p.id,
+        name: p.name,
+        tier: p.tier,
+        created_at: p.created_at.toISOString()
       }))
     });
   });
+
+  // ---------- API KEYS ----------
 
   app.post("/v1/projects/:project_id/keys", async (request, reply) => {
     const projectId = (request.params as { project_id: string }).project_id;
@@ -248,7 +251,7 @@ export function buildApp(): FastifyInstance {
 
     const rows = await query<{ created_at: Date }>(
       `INSERT INTO api_keys(project_id, label, key_id, secret_hash)
-       VALUES ($1, $2, $3, $4)
+       VALUES ($1,$2,$3,$4)
        RETURNING created_at`,
       [projectId, body.label ?? "default", keyId, secretHash]
     );
@@ -258,75 +261,6 @@ export function buildApp(): FastifyInstance {
       api_secret: secret,
       created_at: rows[0].created_at.toISOString()
     });
-  });
-
-  app.get("/v1/projects/:project_id/keys", async (request, reply) => {
-    const projectId = (request.params as { project_id: string }).project_id;
-
-    const rows = await query<{
-      id: string;
-      label: string;
-      key_id: string;
-      created_at: Date;
-      revoked_at: Date | null;
-      last_used_at: Date | null;
-    }>(
-      `SELECT id, label, key_id, created_at, revoked_at, last_used_at
-       FROM api_keys
-       WHERE project_id = $1
-       ORDER BY created_at DESC`,
-      [projectId]
-    );
-
-    return reply.send({
-      keys: rows.map((item) => ({
-        id: item.id,
-        label: item.label,
-        key_id: item.key_id,
-        created_at: item.created_at.toISOString(),
-        revoked_at: item.revoked_at?.toISOString() ?? null,
-        last_used_at: item.last_used_at?.toISOString() ?? null
-      }))
-    });
-  });
-
-  app.post("/v1/projects/:project_id/keys/:key_id/rotate", async (request, reply) => {
-    const { project_id: projectId, key_id: keyId } = request.params as {
-      project_id: string;
-      key_id: string;
-    };
-
-    const secret = generateSecret();
-    const secretHash = await hashSecret(secret);
-    const rows = await query<{ key_id: string; created_at: Date }>(
-      `UPDATE api_keys
-       SET secret_hash = $1, revoked_at = NULL, created_at = now()
-       WHERE project_id = $2 AND key_id = $3
-       RETURNING key_id, created_at`,
-      [secretHash, projectId, keyId]
-    );
-
-    if (rows.length === 0) {
-      return reply.code(404).send({ error: "Key not found" });
-    }
-
-    return reply.send({
-      key_id: rows[0].key_id,
-      api_secret: secret,
-      created_at: rows[0].created_at.toISOString()
-    });
-  });
-
-  app.post("/v1/projects/:project_id/keys/:key_id/revoke", async (request, reply) => {
-    const { project_id: projectId, key_id: keyId } = request.params as {
-      project_id: string;
-      key_id: string;
-    };
-    await query(
-      `UPDATE api_keys SET revoked_at = now() WHERE project_id = $1 AND key_id = $2`,
-      [projectId, keyId]
-    );
-    return reply.send({ ok: true });
   });
 
   app.post("/v1/auth/token", async (request, reply) => {
@@ -368,7 +302,10 @@ export function buildApp(): FastifyInstance {
       tier: key.tier
     });
 
-    await query("UPDATE api_keys SET last_used_at = now() WHERE key_id = $1", [body.key_id]);
+    await query(
+      "UPDATE api_keys SET last_used_at = now() WHERE key_id = $1",
+      [body.key_id]
+    );
 
     return reply.send({
       access_token: token,
@@ -379,124 +316,11 @@ export function buildApp(): FastifyInstance {
     });
   });
 
-  app.post("/v1/resolve", { preHandler: requireAuth("resolve") }, async (request, reply) => {
-    const body = resolveBody.parse(request.body ?? {});
-    const auth = request.auth;
-    if (!auth) {
-      return reply.code(401).send({ error: "Unauthorized" });
-    }
-    if (!(await isKeyActive(auth.projectId, auth.keyId))) {
-      return reply.code(401).send({ error: "Key revoked" });
-    }
-
-    if (!checkRateLimit(auth.projectId, "resolve")) {
-      return reply.code(429).send({ error: "Rate limit exceeded" });
-    }
-
-    const isPresenceValid = await verifyPresenceProof(body.presence as PresenceProof);
-    if (!isPresenceValid) {
-      return reply.code(400).send({ error: "Invalid presence proof" });
-    }
-
-    const cellId = cellIdFromLatLng(body.presence.lat, body.presence.lng, Number(process.env.H3_RESOLUTION ?? 10));
-    const rows = await query<StoredResolverObject>(
-      `SELECT object_id, schema_id, radius_m, payload, cell_id, created_at, parent_object_id, supersedes_object_id
-       FROM resolver_objects
-       WHERE project_id = $1 AND cell_id = $2
-       ORDER BY created_at DESC
-       LIMIT $3`,
-      [auth.projectId, cellId, body.includeHistory ? 100 : 25]
-    );
-
-    return reply.send({
-      query: {
-        cell_id: cellId
-      },
-      objects: rows.map((item) => toResolverObject(item))
-    });
-  });
-
-  app.post("/v1/anchor", { preHandler: requireAuth("anchor") }, async (request, reply) => {
-    const body = anchorBody.parse(request.body ?? {});
-    const auth = request.auth;
-    if (!auth) {
-      return reply.code(401).send({ error: "Unauthorized" });
-    }
-    if (!(await isKeyActive(auth.projectId, auth.keyId))) {
-      return reply.code(401).send({ error: "Key revoked" });
-    }
-
-    if (!checkRateLimit(auth.projectId, "anchor")) {
-      return reply.code(429).send({ error: "Rate limit exceeded" });
-    }
-
-    const presence = body.presence as PresenceProof;
-    const draft = body.objectDraft as LocusObjectDraft;
-
-    if (!(await verifyPresenceProof(presence))) {
-      return reply.code(400).send({ error: "Invalid presence proof" });
-    }
-    if (!(await verifyObjectDraftSignature(draft))) {
-      return reply.code(400).send({ error: "Invalid object draft signature" });
-    }
-
-    const stored = await storeObject({
-      projectId: auth.projectId,
-      presence,
-      draft,
-      parentObjectId: null,
-      supersedesObjectId: null
-    });
-
-    return reply.code(201).send({ object: toResolverObject(stored) });
-  });
-
-  app.post("/v1/supersede", { preHandler: requireAuth("supersede") }, async (request, reply) => {
-    const body = supersedeBody.parse(request.body ?? {});
-    const auth = request.auth;
-    if (!auth) {
-      return reply.code(401).send({ error: "Unauthorized" });
-    }
-    if (!(await isKeyActive(auth.projectId, auth.keyId))) {
-      return reply.code(401).send({ error: "Key revoked" });
-    }
-
-    if (!checkRateLimit(auth.projectId, "supersede")) {
-      return reply.code(429).send({ error: "Rate limit exceeded" });
-    }
-
-    const presence = body.presence as PresenceProof;
-    const draft = body.objectDraft as LocusObjectDraft;
-
-    if (!(await verifyPresenceProof(presence))) {
-      return reply.code(400).send({ error: "Invalid presence proof" });
-    }
-    if (!(await verifyObjectDraftSignature(draft))) {
-      return reply.code(400).send({ error: "Invalid object draft signature" });
-    }
-
-    const target = await query<{ object_id: string }>(
-      "SELECT object_id FROM resolver_objects WHERE object_id = $1 AND project_id = $2",
-      [body.supersedes_object_id, auth.projectId]
-    );
-    if (target.length === 0) {
-      return reply.code(404).send({ error: "supersedes_object_id not found" });
-    }
-
-    const stored = await storeObject({
-      projectId: auth.projectId,
-      presence,
-      draft,
-      parentObjectId: body.supersedes_object_id,
-      supersedesObjectId: body.supersedes_object_id
-    });
-
-    return reply.code(201).send({ object: toResolverObject(stored) });
-  });
-
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof z.ZodError) {
-      return reply.code(400).send({ error: error.issues.map((item) => item.message).join(", ") });
+      return reply.code(400).send({
+        error: error.issues.map((i) => i.message).join(", ")
+      });
     }
     request.log?.error(error);
     return reply.code(500).send({ error: "Internal server error" });
