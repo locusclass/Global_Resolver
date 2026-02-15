@@ -1,94 +1,165 @@
-import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import { z } from "zod";
 
-import {
-  cellIdFromLatLng,
-  createObjectDraftHash,
-  verifyObjectDraftSignature,
-  verifyPresenceProof,
-  type CanonicalJsonValue,
-  type LocusObjectDraft,
-  type PresenceProof
-} from "./shared/index.js";
-
-import { requireAuth } from "./auth/requireAuth.js";
-import { checkRateLimit } from "./auth/rateLimit.js";
+import { query } from "./db/index.js";
 import { signAccessToken } from "./auth/jwt.js";
 import { generateKeyId, generateSecret } from "./crypto/keys.js";
 import { hashSecret, verifySecret } from "./crypto/hash.js";
-import { query } from "./db/index.js";
-
-/* ----------------------------- SCHEMAS ----------------------------- */
 
 const registerDeveloperBody = z.object({
-  email: z.string().email().optional().nullable()
+  email: z.string().email().optional().nullable(),
 });
 
 const createProjectBody = z.object({
   developer_id: z.string().uuid(),
-  name: z.string().min(1).max(120)
+  name: z.string().min(1).max(120),
 });
 
 const keyLabelBody = z.object({
-  label: z.string().min(1).max(120).optional()
+  label: z.string().min(1).max(120).optional(),
 });
 
 const tokenBody = z.object({
   key_id: z.string().min(5),
-  api_secret: z.string().min(5)
+  api_secret: z.string().min(5),
 });
 
-/* ----------------------------- BUILD APP ----------------------------- */
+function scopesForTier(tier: "free" | "pro"): string[] {
+  return ["resolve", "anchor", "supersede"];
+}
 
 export function buildApp(): FastifyInstance {
   const app = Fastify({ logger: true });
 
-  /* ----------------------------- CORS FIX ----------------------------- */
+  // ---------------------------
+  // CORS (REQUIRED for Flutter Web)
+  // ---------------------------
   app.register(cors, {
-    origin: true, // allow any origin (safe for API layer)
+    origin: true,
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
   });
-  /* ------------------------------------------------------------------- */
 
-  /* ----------------------------- HEALTH ------------------------------- */
-
+  // ---------------------------
+  // Health
+  // ---------------------------
   app.get("/health", async () => ({ message: "ok" }));
   app.get("/v1/health", async () => ({ message: "ok" }));
 
-  /* ----------------------- DEV + PROJECT ------------------------------ */
-
+  // ---------------------------
+  // Developer Registration
+  // ---------------------------
   app.post("/v1/dev/register", async (request, reply) => {
     const body = registerDeveloperBody.parse(request.body ?? {});
+
     const rows = await query<{ id: string }>(
       "INSERT INTO developers(email) VALUES ($1) RETURNING id",
       [body.email ?? null]
     );
+
     return reply.send({ developer_id: rows[0].id });
   });
 
+  // ---------------------------
+  // Create Project
+  // ---------------------------
   app.post("/v1/projects", async (request, reply) => {
     const body = createProjectBody.parse(request.body ?? {});
-    const rows = await query<{ id: string; name: string; tier: "free" | "pro"; created_at: Date }>(
-      `INSERT INTO projects(developer_id, name)
-       VALUES ($1, $2)
-       RETURNING id, name, tier, created_at`,
+
+    const rows = await query<{
+      id: string;
+      name: string;
+      tier: "free" | "pro";
+      created_at: Date;
+    }>(
+      `
+      INSERT INTO projects(developer_id, name)
+      VALUES ($1, $2)
+      RETURNING id, name, tier, created_at
+      `,
       [body.developer_id, body.name]
     );
 
     const project = rows[0];
+
     return reply.code(201).send({
       project_id: project.id,
       name: project.name,
       tier: project.tier,
-      created_at: project.created_at.toISOString()
+      created_at: project.created_at.toISOString(),
     });
   });
 
-  /* ----------------------------- AUTH -------------------------------- */
+  // ---------------------------
+  // GET Projects (FIXES YOUR 404)
+  // ---------------------------
+  app.get("/v1/projects", async (request, reply) => {
+    const developerId = (request.query as { developer_id?: string })
+      .developer_id;
 
+    if (!developerId) {
+      return reply
+        .code(400)
+        .send({ error: "developer_id is required" });
+    }
+
+    const rows = await query<{
+      id: string;
+      name: string;
+      tier: "free" | "pro";
+      created_at: Date;
+    }>(
+      `
+      SELECT id, name, tier, created_at
+      FROM projects
+      WHERE developer_id = $1
+      ORDER BY created_at DESC
+      `,
+      [developerId]
+    );
+
+    return reply.send({
+      projects: rows.map((p) => ({
+        project_id: p.id,
+        name: p.name,
+        tier: p.tier,
+        created_at: p.created_at.toISOString(),
+      })),
+    });
+  });
+
+  // ---------------------------
+  // Create API Key
+  // ---------------------------
+  app.post("/v1/projects/:project_id/keys", async (request, reply) => {
+    const projectId = (request.params as { project_id: string })
+      .project_id;
+
+    const body = keyLabelBody.parse(request.body ?? {});
+
+    const keyId = generateKeyId();
+    const secret = generateSecret();
+    const secretHash = await hashSecret(secret);
+
+    const rows = await query<{ created_at: Date }>(
+      `
+      INSERT INTO api_keys(project_id, label, key_id, secret_hash)
+      VALUES ($1, $2, $3, $4)
+      RETURNING created_at
+      `,
+      [projectId, body.label ?? "default", keyId, secretHash]
+    );
+
+    return reply.code(201).send({
+      key_id: keyId,
+      api_secret: secret,
+      created_at: rows[0].created_at.toISOString(),
+    });
+  });
+
+  // ---------------------------
+  // Auth Token
+  // ---------------------------
   app.post("/v1/auth/token", async (request, reply) => {
     const body = tokenBody.parse(request.body ?? {});
 
@@ -98,11 +169,13 @@ export function buildApp(): FastifyInstance {
       revoked_at: Date | null;
       tier: "free" | "pro";
     }>(
-      `SELECT k.project_id, k.secret_hash, k.revoked_at, p.tier
-       FROM api_keys k
-       JOIN projects p ON p.id = k.project_id
-       WHERE k.key_id = $1
-       LIMIT 1`,
+      `
+      SELECT k.project_id, k.secret_hash, k.revoked_at, p.tier
+      FROM api_keys k
+      JOIN projects p ON p.id = k.project_id
+      WHERE k.key_id = $1
+      LIMIT 1
+      `,
       [body.key_id]
     );
 
@@ -111,39 +184,47 @@ export function buildApp(): FastifyInstance {
     }
 
     const key = rows[0];
+
     if (key.revoked_at) {
       return reply.code(401).send({ error: "Key revoked" });
     }
 
     const valid = await verifySecret(body.api_secret, key.secret_hash);
+
     if (!valid) {
       return reply.code(401).send({ error: "Invalid credentials" });
     }
 
-    const scopes = ["resolve", "anchor", "supersede"];
+    const scopes = scopesForTier(key.tier);
 
     const token = await signAccessToken({
       projectId: key.project_id,
       keyId: body.key_id,
       scopes,
-      tier: key.tier
+      tier: key.tier,
     });
+
+    await query(
+      "UPDATE api_keys SET last_used_at = now() WHERE key_id = $1",
+      [body.key_id]
+    );
 
     return reply.send({
       access_token: token,
       token_type: "Bearer",
       expires_in: 900,
       project_id: key.project_id,
-      scopes
+      scopes,
     });
   });
 
-  /* --------------------------- ERROR HANDLER -------------------------- */
-
+  // ---------------------------
+  // Error Handler
+  // ---------------------------
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof z.ZodError) {
       return reply.code(400).send({
-        error: error.issues.map((i) => i.message).join(", ")
+        error: error.issues.map((i) => i.message).join(", "),
       });
     }
 
