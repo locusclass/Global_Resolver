@@ -6,8 +6,14 @@ import { withClient } from "./index.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * Resolve migrations directory safely for both:
+ * - development (tsx -> src/db/migrations)
+ * - production (node dist -> dist/db/migrations)
+ */
 async function resolveMigrationsDir(): Promise<string | null> {
   const candidate = path.join(__dirname, "migrations");
+
   try {
     await fs.access(candidate);
     return candidate;
@@ -28,11 +34,14 @@ async function ensureMigrationsTable(client: any) {
 
 async function listMigrationFiles(migrationsDir: string) {
   const files = await fs.readdir(migrationsDir);
-  return files.filter((name) => name.endsWith(".sql")).sort();
+  return files
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
 }
 
 export async function migrateUp() {
   const migrationsDir = await resolveMigrationsDir();
+
   if (!migrationsDir) {
     console.warn("Skipping migrations: directory not found.");
     return;
@@ -41,20 +50,30 @@ export async function migrateUp() {
   await withClient(async (client) => {
     await ensureMigrationsTable(client);
 
-    const appliedRows = await client.query("SELECT version FROM schema_migrations");
-    const applied = new Set(appliedRows.rows.map((row: any) => row.version));
+    const appliedRows = await client.query(
+      "SELECT version FROM schema_migrations"
+    );
+    const applied = new Set(
+      appliedRows.rows.map((row: any) => row.version)
+    );
 
     const files = await listMigrationFiles(migrationsDir);
 
     for (const file of files) {
       if (applied.has(file)) continue;
 
-      const sql = await fs.readFile(path.join(migrationsDir, file), "utf8");
+      const sql = await fs.readFile(
+        path.join(migrationsDir, file),
+        "utf8"
+      );
 
       await client.query("BEGIN");
       try {
         await client.query(sql);
-        await client.query("INSERT INTO schema_migrations(version) VALUES ($1)", [file]);
+        await client.query(
+          "INSERT INTO schema_migrations(version) VALUES ($1)",
+          [file]
+        );
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
@@ -75,16 +94,22 @@ export async function migrateDown() {
     if (rows.rowCount === 0) return;
 
     const latest = rows.rows[0].version;
-    await client.query("DELETE FROM schema_migrations WHERE version = $1", [latest]);
+
+    await client.query(
+      "DELETE FROM schema_migrations WHERE version = $1",
+      [latest]
+    );
   });
 }
 
 async function main() {
   const direction = process.argv[2] ?? "up";
+
   if (direction === "down") {
     await migrateDown();
     return;
   }
+
   await migrateUp();
 }
 
