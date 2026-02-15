@@ -6,8 +6,8 @@
   "main": "dist/server.js",
   "types": "dist/server.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && mkdir -p dist/db && cp -r src/db/migrations dist/db/migrations",
-    "typecheck": "tsc -p tsconfig.build.json --noEmit",
+    "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.build.json && mkdir -p dist/db && cp -r src/db/migrations dist/db/migrations",
+    "typecheck": "node ./node_modules/typescript/bin/tsc -p tsconfig.build.json --noEmit",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
     "db:migrate": "tsx src/db/migrate.ts up",
