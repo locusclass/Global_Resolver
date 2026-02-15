@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 
+import Fastify, { type FastifyInstance } from "fastify";
+import cors from "@fastify/cors";
+import { z } from "zod";
+
 import {
   cellIdFromLatLng,
   createObjectDraftHash,
@@ -9,11 +13,7 @@ import {
   type LocusObjectDraft,
   type PresenceProof
 } from "./shared/index.js";
-import Fastify, { type FastifyInstance } from "fastify";
-import { z } from "zod";
 
-import { requireAuth } from "./auth/requireAuth.js";
-import { checkRateLimit } from "./auth/rateLimit.js";
 import { signAccessToken } from "./auth/jwt.js";
 import { generateKeyId, generateSecret } from "./crypto/keys.js";
 import { hashSecret, verifySecret } from "./crypto/hash.js";
@@ -85,9 +85,7 @@ type StoredResolverObject = {
 };
 
 function scopesForTier(tier: "free" | "pro"): string[] {
-  if (tier === "free") {
-    return ["resolve", "anchor", "supersede"];
-  }
+  if (tier === "free") return ["resolve", "anchor", "supersede"];
   return ["resolve", "anchor", "supersede"];
 }
 
@@ -170,21 +168,11 @@ async function storeObject(params: {
   return rows[0];
 }
 
-async function isKeyActive(projectId: string, keyId: string): Promise<boolean> {
-  const rows = await query<{ ok: number }>(
-    `SELECT 1 as ok
-     FROM api_keys
-     WHERE project_id = $1
-       AND key_id = $2
-       AND revoked_at IS NULL
-     LIMIT 1`,
-    [projectId, keyId]
-  );
-  return rows.length > 0;
-}
-
 export function buildApp(): FastifyInstance {
   const app = Fastify({ logger: true });
+
+  // ✅ Required for Flutter Web / browsers
+  app.register(cors, { origin: true });
 
   app.get("/health", async () => ({ message: "ok" }));
   app.get("/v1/health", async () => ({ message: "ok" }));
@@ -302,10 +290,7 @@ export function buildApp(): FastifyInstance {
       tier: key.tier
     });
 
-    await query(
-      "UPDATE api_keys SET last_used_at = now() WHERE key_id = $1",
-      [body.key_id]
-    );
+    await query("UPDATE api_keys SET last_used_at = now() WHERE key_id = $1", [body.key_id]);
 
     return reply.send({
       access_token: token,
@@ -315,6 +300,97 @@ export function buildApp(): FastifyInstance {
       scopes
     });
   });
+
+  // ---------- RESOLVER RUNTIME ----------
+
+  app.post("/v1/resolve", async (request, reply) => {
+    const body = resolveBody.parse(request.body ?? {});
+    const presence = body.presence;
+
+    const ok = await verifyPresenceProof(presence);
+    if (!ok) {
+      return reply.code(400).send({ error: "Invalid presence proof" });
+    }
+
+    const cellId = cellIdFromLatLng(
+      presence.lat,
+      presence.lng,
+      Number(process.env.H3_RESOLUTION ?? 10)
+    );
+
+    const rows = await query<StoredResolverObject>(
+      `
+      SELECT object_id, schema_id, radius_m, payload, cell_id,
+             created_at, parent_object_id, supersedes_object_id
+      FROM resolver_objects
+      WHERE cell_id = $1
+      ORDER BY created_at DESC
+      `,
+      [cellId]
+    );
+
+    return reply.send({
+      cell_id: cellId,
+      objects: rows.map(toResolverObject)
+    });
+  });
+
+  app.post("/v1/anchor", async (request, reply) => {
+    const body = anchorBody.parse(request.body ?? {});
+    const { presence, objectDraft } = body;
+
+    const presenceOk = await verifyPresenceProof(presence);
+    if (!presenceOk) {
+      return reply.code(400).send({ error: "Invalid presence proof" });
+    }
+
+    const sigOk = await verifyObjectDraftSignature(objectDraft);
+    if (!sigOk) {
+      return reply.code(400).send({ error: "Invalid object draft signature" });
+    }
+
+    // For now: projectId is required by schema. You can later pull from JWT.
+    const projectId = process.env.PUBLIC_PROJECT_ID ?? "public";
+
+    const stored = await storeObject({
+      projectId,
+      presence,
+      draft: objectDraft,
+      parentObjectId: null,
+      supersedesObjectId: null
+    });
+
+    return reply.code(201).send({ object: toResolverObject(stored) });
+  });
+
+  app.post("/v1/supersede", async (request, reply) => {
+    const body = supersedeBody.parse(request.body ?? {});
+    const { presence, objectDraft, supersedes_object_id } = body;
+
+    const presenceOk = await verifyPresenceProof(presence);
+    if (!presenceOk) {
+      return reply.code(400).send({ error: "Invalid presence proof" });
+    }
+
+    const sigOk = await verifyObjectDraftSignature(objectDraft);
+    if (!sigOk) {
+      return reply.code(400).send({ error: "Invalid object draft signature" });
+    }
+
+    const projectId = process.env.PUBLIC_PROJECT_ID ?? "public";
+
+    const stored = await storeObject({
+      projectId,
+      presence,
+      draft: objectDraft,
+      parentObjectId: null,
+      supersedesObjectId: supersedes_object_id
+    });
+
+    return reply.code(201).send({ object: toResolverObject(stored) });
+  });
+
+  // ---------- ERROR HANDLER ----------
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof z.ZodError) {
