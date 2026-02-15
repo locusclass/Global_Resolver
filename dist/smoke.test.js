@@ -5,4 +5,3 @@ test("key and secret format", () => {
     assert.match(generateKeyId(), /^lk_[A-Za-z0-9_-]+$/);
     assert.match(generateSecret(), /^ls_[A-Za-z0-9_-]+$/);
 });
-//# sourceMappingURL=smoke.test.js.map

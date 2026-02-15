@@ -11,11 +11,7 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "types": ["node"],
-    "baseUrl": ".",
-    "paths": {
-      "@locus-class/shared": ["src/shared"]
-    }
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"]
 }

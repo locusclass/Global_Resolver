@@ -10,4 +10,3 @@ export async function verifySecret(secret, hash) {
         return false;
     }
 }
-//# sourceMappingURL=hash.js.map

@@ -64,6 +64,7 @@ export async function signAccessToken(input) {
     const now = Math.floor(Date.now() / 1000);
     return new SignJWT({
         pid: input.projectId,
+        kid: input.keyId,
         scopes: input.scopes,
         tier: input.tier
     })
@@ -82,7 +83,9 @@ export async function verifyAccessToken(token) {
         issuer: ISSUER,
         audience: AUDIENCE
     });
-    if (typeof payload.sub !== "string" || typeof payload.pid !== "string") {
+    if (typeof payload.sub !== "string" ||
+        typeof payload.pid !== "string" ||
+        typeof payload.kid !== "string") {
         throw new Error("Invalid token subject");
     }
     if (!Array.isArray(payload.scopes)) {
@@ -93,4 +96,3 @@ export async function verifyAccessToken(token) {
     }
     return payload;
 }
-//# sourceMappingURL=jwt.js.map

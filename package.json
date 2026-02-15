@@ -19,7 +19,6 @@
   "dependencies": {
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^5.2.5",
-    "@locus-class/shared": "file:src/shared",
     "bcryptjs": "^3.0.2",
     "fastify": "^5.7.4",
     "jose": "^6.1.2",

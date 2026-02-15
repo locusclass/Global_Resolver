@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cellIdFromLatLng, createObjectDraftHash, verifyObjectDraftSignature, verifyPresenceProof } from "@locus-class/shared";
+import { cellIdFromLatLng, createObjectDraftHash, verifyObjectDraftSignature, verifyPresenceProof } from "./shared/index.js";
 import Fastify from "fastify";
 import { z } from "zod";
 import { requireAuth } from "./auth/requireAuth.js";
@@ -131,6 +131,13 @@ async function storeObject(params) {
     ]);
     return rows[0];
 }
+async function isKeyActive(projectId, keyId) {
+    const rows = await query(`SELECT 1 as ok
+     FROM api_keys
+     WHERE project_id = $1 AND key_id = $2 AND revoked_at IS NULL
+     LIMIT 1`, [projectId, keyId]);
+    return rows.length > 0;
+}
 export function buildApp() {
     const app = Fastify({ logger: true });
     app.get("/health", async () => ({ message: "ok" }));
@@ -242,6 +249,7 @@ export function buildApp() {
         const scopes = scopesForTier(key.tier);
         const token = await signAccessToken({
             projectId: key.project_id,
+            keyId: body.key_id,
             scopes,
             tier: key.tier
         });
@@ -259,6 +267,9 @@ export function buildApp() {
         const auth = request.auth;
         if (!auth) {
             return reply.code(401).send({ error: "Unauthorized" });
+        }
+        if (!(await isKeyActive(auth.projectId, auth.keyId))) {
+            return reply.code(401).send({ error: "Key revoked" });
         }
         if (!checkRateLimit(auth.projectId, "resolve")) {
             return reply.code(429).send({ error: "Rate limit exceeded" });
@@ -286,6 +297,9 @@ export function buildApp() {
         if (!auth) {
             return reply.code(401).send({ error: "Unauthorized" });
         }
+        if (!(await isKeyActive(auth.projectId, auth.keyId))) {
+            return reply.code(401).send({ error: "Key revoked" });
+        }
         if (!checkRateLimit(auth.projectId, "anchor")) {
             return reply.code(429).send({ error: "Rate limit exceeded" });
         }
@@ -311,6 +325,9 @@ export function buildApp() {
         const auth = request.auth;
         if (!auth) {
             return reply.code(401).send({ error: "Unauthorized" });
+        }
+        if (!(await isKeyActive(auth.projectId, auth.keyId))) {
+            return reply.code(401).send({ error: "Key revoked" });
         }
         if (!checkRateLimit(auth.projectId, "supersede")) {
             return reply.code(429).send({ error: "Rate limit exceeded" });
@@ -345,4 +362,3 @@ export function buildApp() {
     });
     return app;
 }
-//# sourceMappingURL=app.js.map

@@ -8,7 +8,7 @@ import {
   type CanonicalJsonValue,
   type LocusObjectDraft,
   type PresenceProof
-} from "@locus-class/shared";
+} from "./shared/index.js";
 import Fastify, { type FastifyInstance } from "fastify";
 import { z } from "zod";
 

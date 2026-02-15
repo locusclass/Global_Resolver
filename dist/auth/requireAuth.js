@@ -14,6 +14,7 @@ export function requireAuth(requiredScope) {
             }
             request.auth = {
                 projectId: claims.pid,
+                keyId: claims.kid,
                 scopes,
                 tier: claims.tier
             };
@@ -24,4 +25,3 @@ export function requireAuth(requiredScope) {
         }
     };
 }
-//# sourceMappingURL=requireAuth.js.map

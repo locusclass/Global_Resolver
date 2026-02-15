@@ -12,4 +12,3 @@ export function generateKeyId() {
 export function generateSecret() {
     return `ls_${toBase64Url(randomBytes(32))}`;
 }
-//# sourceMappingURL=keys.js.map

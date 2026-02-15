@@ -20,4 +20,3 @@ export function checkRateLimit(projectId, endpoint) {
     buckets.set(key, current);
     return true;
 }
-//# sourceMappingURL=rateLimit.js.map

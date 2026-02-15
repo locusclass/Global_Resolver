@@ -10,7 +10,7 @@ import {
   signEd25519,
   type LocusObjectDraft,
   type PresenceProof
-} from "@locus-class/shared";
+} from "./shared/index.js";
 
 import { buildApp } from "./app.js";
 import { query } from "./db/index.js";

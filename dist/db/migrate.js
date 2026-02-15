@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { withClient } from "./index.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,8 +61,11 @@ async function main() {
     }
     await migrateUp();
 }
-main().catch((error) => {
-    console.error("Migration failed", error);
-    process.exitCode = 1;
-});
-//# sourceMappingURL=migrate.js.map
+const isDirectCliExecution = typeof process.argv[1] === "string" &&
+    import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectCliExecution) {
+    main().catch((error) => {
+        console.error("Migration failed", error);
+        process.exitCode = 1;
+    });
+}

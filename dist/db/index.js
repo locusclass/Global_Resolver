@@ -16,4 +16,3 @@ export async function query(text, values) {
     const result = await pool.query(text, values);
     return result.rows;
 }
-//# sourceMappingURL=index.js.map
