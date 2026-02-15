@@ -6,7 +6,7 @@
   "main": "dist/server.js",
   "types": "dist/server.d.ts",
   "scripts": {
-    "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && mkdir -p dist/db && cp -r src/db/migrations dist/db/migrations",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
