@@ -12,7 +12,7 @@ import {
   verifyObjectDraftSignature,
   cellIdFromLatLng,
   type PresenceProof,
-  type LocusObjectDraft
+  type LocusObjectDraft,
 } from "./shared/index.js";
 
 /* -------------------------------------------------- */
@@ -47,7 +47,7 @@ const anchorBody = z.object({
   objectDraft: z.any(),
 });
 
-function scopesForTier(tier: "free" | "pro"): string[] {
+function scopesForTier(_: "free" | "pro"): string[] {
   return ["resolve", "anchor", "supersede"];
 }
 
@@ -71,22 +71,20 @@ export function buildApp(): FastifyInstance {
   app.get("/v1/health", async () => ({ message: "ok" }));
 
   /* -------------------------------------------------- */
-  /* Developer Registration */
+  /* Developer */
   /* -------------------------------------------------- */
 
   app.post("/v1/dev/register", async (request, reply) => {
     const body = registerDeveloperBody.parse(request.body ?? {});
-
     const rows = await query<{ id: string }>(
       "INSERT INTO developers(email) VALUES ($1) RETURNING id",
       [body.email ?? null]
     );
-
     return reply.send({ developer_id: rows[0].id });
   });
 
   /* -------------------------------------------------- */
-  /* Create Project */
+  /* Projects */
   /* -------------------------------------------------- */
 
   app.post("/v1/projects", async (request, reply) => {
@@ -116,13 +114,8 @@ export function buildApp(): FastifyInstance {
     });
   });
 
-  /* -------------------------------------------------- */
-  /* List Projects */
-  /* -------------------------------------------------- */
-
   app.get("/v1/projects", async (request, reply) => {
-    const developerId = (request.query as { developer_id?: string })
-      .developer_id;
+    const developerId = (request.query as { developer_id?: string }).developer_id;
 
     if (!developerId) {
       return reply.code(400).send({ error: "developer_id is required" });
@@ -154,7 +147,7 @@ export function buildApp(): FastifyInstance {
   });
 
   /* -------------------------------------------------- */
-  /* Create API Key */
+  /* API Keys */
   /* -------------------------------------------------- */
 
   app.post("/v1/projects/:project_id/keys", async (request, reply) => {
@@ -181,22 +174,19 @@ export function buildApp(): FastifyInstance {
     });
   });
 
-  /* -------------------------------------------------- */
-  /* List API Keys (FIXED) */
-  /* -------------------------------------------------- */
-
   app.get("/v1/projects/:project_id/keys", async (request, reply) => {
     const projectId = (request.params as { project_id: string }).project_id;
 
     const rows = await query<{
-      key_id: string;
+      id: string;
       label: string;
+      key_id: string;
       created_at: Date;
       revoked_at: Date | null;
       last_used_at: Date | null;
     }>(
       `
-      SELECT key_id, label, created_at, revoked_at, last_used_at
+      SELECT id, label, key_id, created_at, revoked_at, last_used_at
       FROM api_keys
       WHERE project_id = $1
       ORDER BY created_at DESC
@@ -206,17 +196,61 @@ export function buildApp(): FastifyInstance {
 
     return reply.send({
       keys: rows.map((k) => ({
-        key_id: k.key_id,
+        id: k.id,
         label: k.label,
+        key_id: k.key_id,
         created_at: k.created_at.toISOString(),
-        revoked_at: k.revoked_at?.toISOString(),
-        last_used_at: k.last_used_at?.toISOString(),
+        revoked_at: k.revoked_at?.toISOString() ?? null,
+        last_used_at: k.last_used_at?.toISOString() ?? null,
       })),
     });
   });
 
+  app.post("/v1/projects/:project_id/keys/:key_id/rotate", async (request, reply) => {
+    const { project_id, key_id } = request.params as {
+      project_id: string;
+      key_id: string;
+    };
+
+    const newSecret = generateSecret();
+    const secretHash = await hashSecret(newSecret);
+
+    await query(
+      `
+      UPDATE api_keys
+      SET secret_hash = $1, revoked_at = NULL
+      WHERE project_id = $2 AND key_id = $3
+      `,
+      [secretHash, project_id, key_id]
+    );
+
+    return reply.send({
+      key_id,
+      api_secret: newSecret,
+      created_at: new Date().toISOString(),
+    });
+  });
+
+  app.post("/v1/projects/:project_id/keys/:key_id/revoke", async (request, reply) => {
+    const { project_id, key_id } = request.params as {
+      project_id: string;
+      key_id: string;
+    };
+
+    await query(
+      `
+      UPDATE api_keys
+      SET revoked_at = now()
+      WHERE project_id = $1 AND key_id = $2
+      `,
+      [project_id, key_id]
+    );
+
+    return reply.send({ success: true });
+  });
+
   /* -------------------------------------------------- */
-  /* Auth Token */
+  /* Auth */
   /* -------------------------------------------------- */
 
   app.post("/v1/auth/token", async (request, reply) => {
@@ -298,59 +332,8 @@ export function buildApp(): FastifyInstance {
     );
 
     return reply.send({
-      query: { cell_id: cellId },
-      objects: rows.map((r) => ({
-        object_id: r.id,
-        schema_id: r.schema_id,
-        radius_m: r.radius_m,
-        cell_id: r.cell_id,
-        created_at: r.created_at,
-        payload: r.payload,
-        parent_object_id: null,
-        supersedes_object_id: null,
-      })),
-    });
-  });
-
-  /* -------------------------------------------------- */
-  /* Spatial Anchor */
-  /* -------------------------------------------------- */
-
-  app.post("/v1/anchor", async (request, reply) => {
-    const body = anchorBody.parse(request.body ?? {});
-    const presence = body.presence as PresenceProof;
-    const draft = body.objectDraft as LocusObjectDraft;
-
-    if (!(await verifyPresenceProof(presence))) {
-      return reply.code(400).send({ error: "Invalid presence proof" });
-    }
-
-    if (!(await verifyObjectDraftSignature(draft))) {
-      return reply.code(400).send({ error: "Invalid object signature" });
-    }
-
-    const cellId = cellIdFromLatLng(presence.lat, presence.lng, 10);
-
-    const rows = await query<any>(
-      `
-      INSERT INTO locus_objects
-        (cell_id, lat, lng, schema_id, radius_m, payload, creator_public_key)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING *
-      `,
-      [
-        cellId,
-        presence.lat,
-        presence.lng,
-        draft.schema_id,
-        draft.radius_m,
-        JSON.stringify(draft.payload),
-        draft.creator_public_key,
-      ]
-    );
-
-    return reply.code(201).send({
-      object: rows[0],
+      queryCellId: cellId,
+      objects: rows,
     });
   });
 
