@@ -7,6 +7,18 @@ import { signAccessToken } from "./auth/jwt.js";
 import { generateKeyId, generateSecret } from "./crypto/keys.js";
 import { hashSecret, verifySecret } from "./crypto/hash.js";
 
+import {
+  verifyPresenceProof,
+  verifyObjectDraftSignature,
+  cellIdFromLatLng,
+  type PresenceProof,
+  type LocusObjectDraft
+} from "./shared/index.js";
+
+/* -------------------------------------------------- */
+/* Schemas */
+/* -------------------------------------------------- */
+
 const registerDeveloperBody = z.object({
   email: z.string().email().optional().nullable(),
 });
@@ -25,30 +37,43 @@ const tokenBody = z.object({
   api_secret: z.string().min(5),
 });
 
+const resolveBody = z.object({
+  presence: z.any(),
+  includeHistory: z.boolean().optional().default(false),
+});
+
+const anchorBody = z.object({
+  presence: z.any(),
+  objectDraft: z.any(),
+});
+
 function scopesForTier(tier: "free" | "pro"): string[] {
   return ["resolve", "anchor", "supersede"];
 }
 
+/* -------------------------------------------------- */
+/* Build App */
+/* -------------------------------------------------- */
+
 export function buildApp(): FastifyInstance {
   const app = Fastify({ logger: true });
 
-  // ---------------------------
-  // CORS (REQUIRED for Flutter Web)
-  // ---------------------------
   app.register(cors, {
     origin: true,
     methods: ["GET", "POST", "OPTIONS"],
   });
 
-  // ---------------------------
-  // Health
-  // ---------------------------
+  /* -------------------------------------------------- */
+  /* Health */
+  /* -------------------------------------------------- */
+
   app.get("/health", async () => ({ message: "ok" }));
   app.get("/v1/health", async () => ({ message: "ok" }));
 
-  // ---------------------------
-  // Developer Registration
-  // ---------------------------
+  /* -------------------------------------------------- */
+  /* Developer Registration */
+  /* -------------------------------------------------- */
+
   app.post("/v1/dev/register", async (request, reply) => {
     const body = registerDeveloperBody.parse(request.body ?? {});
 
@@ -60,9 +85,10 @@ export function buildApp(): FastifyInstance {
     return reply.send({ developer_id: rows[0].id });
   });
 
-  // ---------------------------
-  // Create Project
-  // ---------------------------
+  /* -------------------------------------------------- */
+  /* Create Project */
+  /* -------------------------------------------------- */
+
   app.post("/v1/projects", async (request, reply) => {
     const body = createProjectBody.parse(request.body ?? {});
 
@@ -90,9 +116,10 @@ export function buildApp(): FastifyInstance {
     });
   });
 
-  // ---------------------------
-  // GET Projects (FIXES YOUR 404)
-  // ---------------------------
+  /* -------------------------------------------------- */
+  /* List Projects */
+  /* -------------------------------------------------- */
+
   app.get("/v1/projects", async (request, reply) => {
     const developerId = (request.query as { developer_id?: string })
       .developer_id;
@@ -128,9 +155,10 @@ export function buildApp(): FastifyInstance {
     });
   });
 
-  // ---------------------------
-  // Create API Key
-  // ---------------------------
+  /* -------------------------------------------------- */
+  /* Create API Key */
+  /* -------------------------------------------------- */
+
   app.post("/v1/projects/:project_id/keys", async (request, reply) => {
     const projectId = (request.params as { project_id: string })
       .project_id;
@@ -157,9 +185,10 @@ export function buildApp(): FastifyInstance {
     });
   });
 
-  // ---------------------------
-  // Auth Token
-  // ---------------------------
+  /* -------------------------------------------------- */
+  /* Auth Token */
+  /* -------------------------------------------------- */
+
   app.post("/v1/auth/token", async (request, reply) => {
     const body = tokenBody.parse(request.body ?? {});
 
@@ -218,9 +247,98 @@ export function buildApp(): FastifyInstance {
     });
   });
 
-  // ---------------------------
-  // Error Handler
-  // ---------------------------
+  /* -------------------------------------------------- */
+  /* Spatial Resolve */
+  /* -------------------------------------------------- */
+
+  app.post("/v1/resolve", async (request, reply) => {
+    const body = resolveBody.parse(request.body ?? {});
+    const presence = body.presence as PresenceProof;
+
+    const valid = await verifyPresenceProof(presence);
+    if (!valid) {
+      return reply.code(400).send({ error: "Invalid presence proof" });
+    }
+
+    const RESOLUTION = 10;
+
+    const cellId = cellIdFromLatLng(
+      presence.lat,
+      presence.lng,
+      RESOLUTION
+    );
+
+    const rows = await query<any>(
+      `
+      SELECT *
+      FROM locus_objects
+      WHERE cell_id = $1
+      ORDER BY created_at DESC
+      `,
+      [cellId]
+    );
+
+    return reply.send({
+      queryCellId: cellId,
+      objects: rows,
+    });
+  });
+
+  /* -------------------------------------------------- */
+  /* Spatial Anchor */
+  /* -------------------------------------------------- */
+
+  app.post("/v1/anchor", async (request, reply) => {
+    const body = anchorBody.parse(request.body ?? {});
+    const presence = body.presence as PresenceProof;
+    const draft = body.objectDraft as LocusObjectDraft;
+
+    const presenceValid = await verifyPresenceProof(presence);
+    if (!presenceValid) {
+      return reply.code(400).send({ error: "Invalid presence proof" });
+    }
+
+    const draftValid = await verifyObjectDraftSignature(draft);
+    if (!draftValid) {
+      return reply.code(400).send({ error: "Invalid object signature" });
+    }
+
+    const RESOLUTION = 10;
+
+    const cellId = cellIdFromLatLng(
+      presence.lat,
+      presence.lng,
+      RESOLUTION
+    );
+
+    const rows = await query<any>(
+      `
+      INSERT INTO locus_objects
+        (cell_id, lat, lng, schema_id, radius_m, payload, creator_public_key)
+      VALUES
+        ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+      `,
+      [
+        cellId,
+        presence.lat,
+        presence.lng,
+        draft.schema_id,
+        draft.radius_m,
+        JSON.stringify(draft.payload),
+        draft.creator_public_key,
+      ]
+    );
+
+    return reply.code(201).send({
+      object: rows[0],
+    });
+  });
+
+  /* -------------------------------------------------- */
+  /* Error Handler */
+  /* -------------------------------------------------- */
+
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof z.ZodError) {
       return reply.code(400).send({
