@@ -8,8 +8,6 @@ import { generateKeyId, generateSecret } from "./crypto/keys.js";
 import { hashSecret, verifySecret } from "./crypto/hash.js";
 
 import {
-  verifyPresenceProof,
-  verifyObjectDraftSignature,
   cellIdFromLatLng,
   type PresenceProof,
   type LocusObjectDraft
@@ -233,11 +231,6 @@ export function buildApp(): FastifyInstance {
       tier: key.tier,
     });
 
-    await query(
-      "UPDATE api_keys SET last_used_at = now() WHERE key_id = $1",
-      [body.key_id]
-    );
-
     return reply.send({
       access_token: token,
       token_type: "Bearer",
@@ -248,17 +241,12 @@ export function buildApp(): FastifyInstance {
   });
 
   /* -------------------------------------------------- */
-  /* Spatial Resolve */
+  /* Spatial Resolve (VERIFICATION TEMP DISABLED) */
   /* -------------------------------------------------- */
 
   app.post("/v1/resolve", async (request, reply) => {
     const body = resolveBody.parse(request.body ?? {});
     const presence = body.presence as PresenceProof;
-
-    const valid = await verifyPresenceProof(presence);
-    if (!valid) {
-      return reply.code(400).send({ error: "Invalid presence proof" });
-    }
 
     const RESOLUTION = 10;
 
@@ -285,23 +273,13 @@ export function buildApp(): FastifyInstance {
   });
 
   /* -------------------------------------------------- */
-  /* Spatial Anchor */
+  /* Spatial Anchor (VERIFICATION TEMP DISABLED) */
   /* -------------------------------------------------- */
 
   app.post("/v1/anchor", async (request, reply) => {
     const body = anchorBody.parse(request.body ?? {});
     const presence = body.presence as PresenceProof;
     const draft = body.objectDraft as LocusObjectDraft;
-
-    const presenceValid = await verifyPresenceProof(presence);
-    if (!presenceValid) {
-      return reply.code(400).send({ error: "Invalid presence proof" });
-    }
-
-    const draftValid = await verifyObjectDraftSignature(draft);
-    if (!draftValid) {
-      return reply.code(400).send({ error: "Invalid object signature" });
-    }
 
     const RESOLUTION = 10;
 
