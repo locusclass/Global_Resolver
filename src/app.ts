@@ -8,6 +8,8 @@ import { generateKeyId, generateSecret } from "./crypto/keys.js";
 import { hashSecret, verifySecret } from "./crypto/hash.js";
 
 import {
+  verifyPresenceProof,
+  verifyObjectDraftSignature,
   cellIdFromLatLng,
   type PresenceProof,
   type LocusObjectDraft
@@ -123,9 +125,7 @@ export function buildApp(): FastifyInstance {
       .developer_id;
 
     if (!developerId) {
-      return reply
-        .code(400)
-        .send({ error: "developer_id is required" });
+      return reply.code(400).send({ error: "developer_id is required" });
     }
 
     const rows = await query<{
@@ -158,9 +158,7 @@ export function buildApp(): FastifyInstance {
   /* -------------------------------------------------- */
 
   app.post("/v1/projects/:project_id/keys", async (request, reply) => {
-    const projectId = (request.params as { project_id: string })
-      .project_id;
-
+    const projectId = (request.params as { project_id: string }).project_id;
     const body = keyLabelBody.parse(request.body ?? {});
 
     const keyId = generateKeyId();
@@ -180,6 +178,40 @@ export function buildApp(): FastifyInstance {
       key_id: keyId,
       api_secret: secret,
       created_at: rows[0].created_at.toISOString(),
+    });
+  });
+
+  /* -------------------------------------------------- */
+  /* List API Keys (FIXED) */
+  /* -------------------------------------------------- */
+
+  app.get("/v1/projects/:project_id/keys", async (request, reply) => {
+    const projectId = (request.params as { project_id: string }).project_id;
+
+    const rows = await query<{
+      key_id: string;
+      label: string;
+      created_at: Date;
+      revoked_at: Date | null;
+      last_used_at: Date | null;
+    }>(
+      `
+      SELECT key_id, label, created_at, revoked_at, last_used_at
+      FROM api_keys
+      WHERE project_id = $1
+      ORDER BY created_at DESC
+      `,
+      [projectId]
+    );
+
+    return reply.send({
+      keys: rows.map((k) => ({
+        key_id: k.key_id,
+        label: k.label,
+        created_at: k.created_at.toISOString(),
+        revoked_at: k.revoked_at?.toISOString(),
+        last_used_at: k.last_used_at?.toISOString(),
+      })),
     });
   });
 
@@ -241,20 +273,19 @@ export function buildApp(): FastifyInstance {
   });
 
   /* -------------------------------------------------- */
-  /* Spatial Resolve (VERIFICATION TEMP DISABLED) */
+  /* Spatial Resolve */
   /* -------------------------------------------------- */
 
   app.post("/v1/resolve", async (request, reply) => {
     const body = resolveBody.parse(request.body ?? {});
     const presence = body.presence as PresenceProof;
 
-    const RESOLUTION = 10;
+    const valid = await verifyPresenceProof(presence);
+    if (!valid) {
+      return reply.code(400).send({ error: "Invalid presence proof" });
+    }
 
-    const cellId = cellIdFromLatLng(
-      presence.lat,
-      presence.lng,
-      RESOLUTION
-    );
+    const cellId = cellIdFromLatLng(presence.lat, presence.lng, 10);
 
     const rows = await query<any>(
       `
@@ -267,13 +298,22 @@ export function buildApp(): FastifyInstance {
     );
 
     return reply.send({
-      queryCellId: cellId,
-      objects: rows,
+      query: { cell_id: cellId },
+      objects: rows.map((r) => ({
+        object_id: r.id,
+        schema_id: r.schema_id,
+        radius_m: r.radius_m,
+        cell_id: r.cell_id,
+        created_at: r.created_at,
+        payload: r.payload,
+        parent_object_id: null,
+        supersedes_object_id: null,
+      })),
     });
   });
 
   /* -------------------------------------------------- */
-  /* Spatial Anchor (VERIFICATION TEMP DISABLED) */
+  /* Spatial Anchor */
   /* -------------------------------------------------- */
 
   app.post("/v1/anchor", async (request, reply) => {
@@ -281,20 +321,21 @@ export function buildApp(): FastifyInstance {
     const presence = body.presence as PresenceProof;
     const draft = body.objectDraft as LocusObjectDraft;
 
-    const RESOLUTION = 10;
+    if (!(await verifyPresenceProof(presence))) {
+      return reply.code(400).send({ error: "Invalid presence proof" });
+    }
 
-    const cellId = cellIdFromLatLng(
-      presence.lat,
-      presence.lng,
-      RESOLUTION
-    );
+    if (!(await verifyObjectDraftSignature(draft))) {
+      return reply.code(400).send({ error: "Invalid object signature" });
+    }
+
+    const cellId = cellIdFromLatLng(presence.lat, presence.lng, 10);
 
     const rows = await query<any>(
       `
       INSERT INTO locus_objects
         (cell_id, lat, lng, schema_id, radius_m, payload, creator_public_key)
-      VALUES
-        ($1, $2, $3, $4, $5, $6, $7)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
       `,
       [
