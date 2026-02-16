@@ -33,6 +33,10 @@ type JwtPublicKey = Awaited<ReturnType<typeof importSPKI>>;
 let privateKeyPromise: Promise<JwtPrivateKey> | null = null;
 let publicKeyPromise: Promise<JwtPublicKey> | null = null;
 
+/* -------------------------------------------------- */
+/* Helpers */
+/* -------------------------------------------------- */
+
 function isPem(value: string): boolean {
   return value.includes("BEGIN ");
 }
@@ -49,9 +53,18 @@ function derToPem(label: "PRIVATE KEY" | "PUBLIC KEY", value: string): string {
   return `-----BEGIN ${label}-----\n${wrapped}\n-----END ${label}-----`;
 }
 
+function normalizePemInput(value: string): string {
+  // Fix Railway escaped newlines
+  return value.replace(/\\n/g, "\n").trim();
+}
+
 function keyFingerprint(key: string): string {
   return createHash("sha256").update(key).digest("hex").slice(0, 12);
 }
+
+/* -------------------------------------------------- */
+/* Key Loader */
+/* -------------------------------------------------- */
 
 async function loadKeys(): Promise<{ privateKey: JwtPrivateKey; publicKey: JwtPublicKey }> {
   const privateRaw = process.env.LOCUS_JWT_PRIVATE_KEY;
@@ -59,8 +72,17 @@ async function loadKeys(): Promise<{ privateKey: JwtPrivateKey; publicKey: JwtPu
   const isProd = process.env.NODE_ENV === "production";
 
   if (privateRaw && publicRaw) {
-    const privatePem = isPem(privateRaw) ? privateRaw : derToPem("PRIVATE KEY", privateRaw);
-    const publicPem = isPem(publicRaw) ? publicRaw : derToPem("PUBLIC KEY", publicRaw);
+    const privateNormalized = normalizePemInput(privateRaw);
+    const publicNormalized = normalizePemInput(publicRaw);
+
+    const privatePem = isPem(privateNormalized)
+      ? privateNormalized
+      : derToPem("PRIVATE KEY", privateNormalized);
+
+    const publicPem = isPem(publicNormalized)
+      ? publicNormalized
+      : derToPem("PUBLIC KEY", publicNormalized);
+
     return {
       privateKey: await importPKCS8(privatePem, "EdDSA"),
       publicKey: await importSPKI(publicPem, "EdDSA")
@@ -73,16 +95,29 @@ async function loadKeys(): Promise<{ privateKey: JwtPrivateKey; publicKey: JwtPu
     );
   }
 
-  const generated = await generateKeyPair("EdDSA", { crv: "Ed25519", extractable: true });
+  // Dev fallback (ephemeral keypair)
+  const generated = await generateKeyPair("EdDSA", {
+    crv: "Ed25519",
+    extractable: true
+  });
+
   const publicPem = await exportSPKI(generated.publicKey);
+
   console.warn(
-    `[locus] Using ephemeral JWT keypair (dev only), public fingerprint=${keyFingerprint(publicPem)}`
+    `[locus] Using ephemeral JWT keypair (dev only), public fingerprint=${keyFingerprint(
+      publicPem
+    )}`
   );
+
   return {
     privateKey: generated.privateKey,
     publicKey: generated.publicKey
   };
 }
+
+/* -------------------------------------------------- */
+/* Key Accessors */
+/* -------------------------------------------------- */
 
 async function getPrivateKey(): Promise<JwtPrivateKey> {
   if (!privateKeyPromise) {
@@ -102,9 +137,14 @@ async function getPublicKey(): Promise<JwtPublicKey> {
   return publicKeyPromise;
 }
 
+/* -------------------------------------------------- */
+/* Sign Access Token */
+/* -------------------------------------------------- */
+
 export async function signAccessToken(input: AccessTokenInput): Promise<string> {
   const privateKey = await getPrivateKey();
   const now = Math.floor(Date.now() / 1000);
+
   return new SignJWT({
     pid: input.projectId,
     kid: input.keyId,
@@ -121,8 +161,13 @@ export async function signAccessToken(input: AccessTokenInput): Promise<string> 
     .sign(privateKey);
 }
 
+/* -------------------------------------------------- */
+/* Verify Access Token */
+/* -------------------------------------------------- */
+
 export async function verifyAccessToken(token: string): Promise<AccessTokenClaims> {
   const publicKey = await getPublicKey();
+
   const { payload } = await jwtVerify(token, publicKey, {
     issuer: ISSUER,
     audience: AUDIENCE
@@ -135,9 +180,11 @@ export async function verifyAccessToken(token: string): Promise<AccessTokenClaim
   ) {
     throw new Error("Invalid token subject");
   }
+
   if (!Array.isArray(payload.scopes)) {
     throw new Error("Invalid token scopes");
   }
+
   if (payload.tier !== "free" && payload.tier !== "pro") {
     throw new Error("Invalid token tier");
   }
