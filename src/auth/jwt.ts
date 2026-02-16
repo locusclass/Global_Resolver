@@ -4,7 +4,6 @@ import {
   exportSPKI,
   generateKeyPair,
   importPKCS8,
-  importSPKI,
   jwtVerify,
   SignJWT,
   type JWTPayload
@@ -28,7 +27,7 @@ export type AccessTokenClaims = JWTPayload & {
 };
 
 type JwtPrivateKey = Awaited<ReturnType<typeof importPKCS8>>;
-type JwtPublicKey = Awaited<ReturnType<typeof importSPKI>>;
+type JwtPublicKey = JwtPrivateKey;
 
 let privateKeyPromise: Promise<JwtPrivateKey> | null = null;
 let publicKeyPromise: Promise<JwtPublicKey> | null = null;
@@ -47,7 +46,7 @@ function normalizeBase64(value: string): string {
   return mod === 0 ? normalized : normalized + "=".repeat(4 - mod);
 }
 
-function derToPem(label: "PRIVATE KEY" | "PUBLIC KEY", value: string): string {
+function derToPem(label: "PRIVATE KEY", value: string): string {
   const der = Buffer.from(normalizeBase64(value), "base64").toString("base64");
   const wrapped = der.match(/.{1,64}/g)?.join("\n") ?? der;
   return `-----BEGIN ${label}-----\n${wrapped}\n-----END ${label}-----`;
@@ -68,30 +67,29 @@ function keyFingerprint(key: string): string {
 
 async function loadKeys(): Promise<{ privateKey: JwtPrivateKey; publicKey: JwtPublicKey }> {
   const privateRaw = process.env.LOCUS_JWT_PRIVATE_KEY;
-  const publicRaw = process.env.LOCUS_JWT_PUBLIC_KEY;
   const isProd = process.env.NODE_ENV === "production";
 
-  if (privateRaw && publicRaw) {
+  if (privateRaw) {
     const privateNormalized = normalizePemInput(privateRaw);
-    const publicNormalized = normalizePemInput(publicRaw);
 
     const privatePem = isPem(privateNormalized)
       ? privateNormalized
       : derToPem("PRIVATE KEY", privateNormalized);
 
-    const publicPem = isPem(publicNormalized)
-      ? publicNormalized
-      : derToPem("PUBLIC KEY", publicNormalized);
+    const privateKey = await importPKCS8(privatePem, "EdDSA");
+
+    // For Ed25519, the same key object can verify
+    const publicKey = privateKey;
 
     return {
-      privateKey: await importPKCS8(privatePem, "EdDSA"),
-      publicKey: await importSPKI(publicPem, "EdDSA")
+      privateKey,
+      publicKey
     };
   }
 
   if (isProd) {
     throw new Error(
-      "Missing LOCUS_JWT_PRIVATE_KEY/LOCUS_JWT_PUBLIC_KEY in production environment"
+      "Missing LOCUS_JWT_PRIVATE_KEY in production environment"
     );
   }
 
