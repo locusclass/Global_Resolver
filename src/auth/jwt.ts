@@ -1,9 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
-
+import { randomUUID } from "node:crypto";
 import {
-  exportSPKI,
   generateKeyPair,
-  importPKCS8,
   jwtVerify,
   SignJWT,
   type JWTPayload
@@ -26,86 +23,26 @@ export type AccessTokenClaims = JWTPayload & {
   tier: "free" | "pro";
 };
 
-type JwtPrivateKey = Awaited<ReturnType<typeof importPKCS8>>;
-type JwtPublicKey = JwtPrivateKey;
+type JwtPrivateKey = Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
+type JwtPublicKey = Awaited<ReturnType<typeof generateKeyPair>>["publicKey"];
 
 let privateKeyPromise: Promise<JwtPrivateKey> | null = null;
 let publicKeyPromise: Promise<JwtPublicKey> | null = null;
 
 /* -------------------------------------------------- */
-/* Helpers */
+/* Key Loader (Runtime Generated – No ENV Required) */
 /* -------------------------------------------------- */
 
-function isPem(value: string): boolean {
-  return value.includes("BEGIN ");
-}
-
-function normalizeBase64(value: string): string {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const mod = normalized.length % 4;
-  return mod === 0 ? normalized : normalized + "=".repeat(4 - mod);
-}
-
-function derToPem(label: "PRIVATE KEY", value: string): string {
-  const der = Buffer.from(normalizeBase64(value), "base64").toString("base64");
-  const wrapped = der.match(/.{1,64}/g)?.join("\n") ?? der;
-  return `-----BEGIN ${label}-----\n${wrapped}\n-----END ${label}-----`;
-}
-
-function normalizePemInput(value: string): string {
-  // Fix Railway escaped newlines
-  return value.replace(/\\n/g, "\n").trim();
-}
-
-function keyFingerprint(key: string): string {
-  return createHash("sha256").update(key).digest("hex").slice(0, 12);
-}
-
-/* -------------------------------------------------- */
-/* Key Loader */
-/* -------------------------------------------------- */
-
-async function loadKeys(): Promise<{ privateKey: JwtPrivateKey; publicKey: JwtPublicKey }> {
-  const privateRaw = process.env.LOCUS_JWT_PRIVATE_KEY;
-  const isProd = process.env.NODE_ENV === "production";
-
-  if (privateRaw) {
-    const privateNormalized = normalizePemInput(privateRaw);
-
-    const privatePem = isPem(privateNormalized)
-      ? privateNormalized
-      : derToPem("PRIVATE KEY", privateNormalized);
-
-    const privateKey = await importPKCS8(privatePem, "EdDSA");
-
-    // For Ed25519, the same key object can verify
-    const publicKey = privateKey;
-
-    return {
-      privateKey,
-      publicKey
-    };
-  }
-
-  if (isProd) {
-    throw new Error(
-      "Missing LOCUS_JWT_PRIVATE_KEY in production environment"
-    );
-  }
-
-  // Dev fallback (ephemeral keypair)
+async function loadKeys(): Promise<{
+  privateKey: JwtPrivateKey;
+  publicKey: JwtPublicKey;
+}> {
   const generated = await generateKeyPair("EdDSA", {
     crv: "Ed25519",
-    extractable: true
+    extractable: false
   });
 
-  const publicPem = await exportSPKI(generated.publicKey);
-
-  console.warn(
-    `[locus] Using ephemeral JWT keypair (dev only), public fingerprint=${keyFingerprint(
-      publicPem
-    )}`
-  );
+  console.warn("[locus] Runtime JWT keypair generated");
 
   return {
     privateKey: generated.privateKey,
@@ -113,15 +50,11 @@ async function loadKeys(): Promise<{ privateKey: JwtPrivateKey; publicKey: JwtPu
   };
 }
 
-/* -------------------------------------------------- */
-/* Key Accessors */
-/* -------------------------------------------------- */
-
 async function getPrivateKey(): Promise<JwtPrivateKey> {
   if (!privateKeyPromise) {
     const keys = loadKeys();
-    privateKeyPromise = keys.then((value) => value.privateKey);
-    publicKeyPromise = keys.then((value) => value.publicKey);
+    privateKeyPromise = keys.then((k) => k.privateKey);
+    publicKeyPromise = keys.then((k) => k.publicKey);
   }
   return privateKeyPromise;
 }
@@ -129,8 +62,8 @@ async function getPrivateKey(): Promise<JwtPrivateKey> {
 async function getPublicKey(): Promise<JwtPublicKey> {
   if (!publicKeyPromise) {
     const keys = loadKeys();
-    privateKeyPromise = keys.then((value) => value.privateKey);
-    publicKeyPromise = keys.then((value) => value.publicKey);
+    privateKeyPromise = keys.then((k) => k.privateKey);
+    publicKeyPromise = keys.then((k) => k.publicKey);
   }
   return publicKeyPromise;
 }
@@ -139,7 +72,9 @@ async function getPublicKey(): Promise<JwtPublicKey> {
 /* Sign Access Token */
 /* -------------------------------------------------- */
 
-export async function signAccessToken(input: AccessTokenInput): Promise<string> {
+export async function signAccessToken(
+  input: AccessTokenInput
+): Promise<string> {
   const privateKey = await getPrivateKey();
   const now = Math.floor(Date.now() / 1000);
 
@@ -163,7 +98,9 @@ export async function signAccessToken(input: AccessTokenInput): Promise<string> 
 /* Verify Access Token */
 /* -------------------------------------------------- */
 
-export async function verifyAccessToken(token: string): Promise<AccessTokenClaims> {
+export async function verifyAccessToken(
+  token: string
+): Promise<AccessTokenClaims> {
   const publicKey = await getPublicKey();
 
   const { payload } = await jwtVerify(token, publicKey, {
